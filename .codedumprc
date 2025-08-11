@@ -1,0 +1,8 @@
+# .codedumprc
+root=.
+target=./models
+out=models_tree.txt
+ext=.go
+exclude=_test.go,/.git/,/vendor/
+include=
+pkg=false
