@@ -1,10 +1,9 @@
-package main
+package codedump
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"go/build"
 	"io"
@@ -16,20 +15,23 @@ import (
 	"time"
 )
 
-const defaultRCName = ".codedumprc"
+// DefaultRCName is the default name for the RC/config file.
+const DefaultRCName = ".codedumprc"
 
-type cfg struct {
+// Config holds the parameters for a dump run.
+type Config struct {
 	Root    string // where the final TXT will be saved
 	Target  string // folder to scan
 	Out     string // output file name (relative to Root)
 	Ext     string // file extension to include
-	Include string // optional substring filter
-	Exclude string // comma-separated substrings to skip
+	Include string // optional substring filter (path/content)
+	Exclude string // comma-separated substrings to skip (path)
 	Pkg     bool   // keep "package" line if true
 }
 
-func defaultCfg() cfg {
-	return cfg{
+// DefaultConfig returns sane defaults for the tool.
+func DefaultConfig() Config {
+	return Config{
 		Root:    ".",
 		Target:  "./models",
 		Out:     "models_tree.txt",
@@ -39,64 +41,25 @@ func defaultCfg() cfg {
 	}
 }
 
-func main() {
-	var (
-		flInit                    bool
-		flRoot, flTarget, flOut   string
-		flExt, flInclude, flExclude string
-		flPkg                     bool
-		flRCPath                  string
-	)
-	flag.BoolVar(&flInit, "init", false, fmt.Sprintf("Create a %s in the current directory", defaultRCName))
-	flag.StringVar(&flRCPath, "rc", "", "Path to RC file (optional). If empty, will search locally and in $HOME")
-	flag.StringVar(&flRoot, "root", "", "Root dir (overrides RC)")
-	flag.StringVar(&flTarget, "target", "", "Target dir to scan (overrides RC)")
-	flag.StringVar(&flOut, "out", "", "Output file name (overrides RC)")
-	flag.StringVar(&flExt, "ext", "", "Target file extension (overrides RC)")
-	flag.StringVar(&flInclude, "include", "", "Required substring in path (overrides RC)")
-	flag.StringVar(&flExclude, "exclude", "", "Comma-separated substrings to skip (overrides RC)")
-	flag.BoolVar(&flPkg, "pkg", false, "Preserve package line (overrides RC -> true)")
-	flag.Parse()
+// Item represents one collected file.
+type Item struct {
+	rel  string
+	abs  string
+	sha  string
+	size int64
+}
 
-	if flInit {
-		if err := writeDefaultRC(defaultRCName); err != nil {
-			fatal(err)
-		}
-		fmt.Printf("Created %s with defaults. Adjust root/target/out according to your project.\n", defaultRCName)
-		return
-	}
-
-	c := defaultCfg()
-	rcPath := flRCPath
-	if rcPath == "" {
-		rcPath = findRC()
-	}
-	if rcPath != "" {
-		if err := readRC(rcPath, &c); err != nil {
-			fatal(fmt.Errorf("error reading RC %s: %w", rcPath, err))
-		}
-	}
-
-	// Apply CLI overrides
-	if flRoot != "" { c.Root = flRoot }
-	if flTarget != "" { c.Target = flTarget }
-	if flOut != "" { c.Out = flOut }
-	if flExt != "" { c.Ext = flExt }
-	if flInclude != "" { c.Include = flInclude }
-	if flExclude != "" { c.Exclude = flExclude }
-	if flPkg { c.Pkg = true }
-
-	// Normalize paths
+// Dump generates the concatenated output and writes it to the configured Out path.
+// It returns the absolute output path and the number of files written.
+func Dump(c Config) (string, int, error) {
 	wd, _ := os.Getwd()
-	rootAbs := absFrom(wd, c.Root)
-	targetAbs := absFrom(wd, c.Target)
-	outAbs := absFrom(rootAbs, c.Out)
+	rootAbs := AbsFrom(wd, c.Root)
+	targetAbs := AbsFrom(wd, c.Target)
+	outAbs := AbsFrom(rootAbs, c.Out)
 
-	// Collect files
-	items, err := collect(targetAbs, c)
-	if err != nil { fatal(err) }
+	items, err := Collect(targetAbs, c)
+	if err != nil { return "", 0, err }
 
-	// Build output
 	var buf bytes.Buffer
 	now := time.Now().Format(time.RFC3339)
 	fmt.Fprintf(&buf, "// ===== CODEDUMP GENERATED =====\n")
@@ -111,10 +74,10 @@ func main() {
 
 	for _, it := range items {
 		data, err := os.ReadFile(it.abs)
-		if err != nil { fatal(err) }
+		if err != nil { return "", 0, err }
 		content := data
 		if !c.Pkg {
-			content = stripPackageLine(data)
+			content = StripPackageLine(data)
 		}
 		fmt.Fprintf(&buf, "// ===== BEGIN FILE =====\n")
 		fmt.Fprintf(&buf, "// #rel_path: %s\n", it.rel)
@@ -129,23 +92,16 @@ func main() {
 		fmt.Fprintln(&buf, "// ===== END FILE =====\n")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outAbs), 0o755); err != nil { fatal(err) }
-	if err := os.WriteFile(outAbs, buf.Bytes(), 0o644); err != nil { fatal(err) }
-
-	fmt.Printf("✅ codeDump complete! Generated %q with %d files.\n", outAbs, len(items))
+	if err := os.MkdirAll(filepath.Dir(outAbs), 0o755); err != nil { return "", 0, err }
+	if err := os.WriteFile(outAbs, buf.Bytes(), 0o644); err != nil { return "", 0, err }
+	return outAbs, len(items), nil
 }
 
-type item struct {
-	rel  string
-	abs  string
-	sha  string
-	size int64
-}
-
-func collect(targetAbs string, c cfg) ([]item, error) {
-	excl := splitClean(c.Exclude)
+// Collect walks the target directory, applying filters, and returns metadata for each file.
+func Collect(targetAbs string, c Config) ([]Item, error) {
+	excl := SplitClean(c.Exclude)
 	wd, _ := os.Getwd()
-	var out []item
+	var out []Item
 
 	err := filepath.WalkDir(targetAbs, func(path string, d os.DirEntry, err error) error {
 		if err != nil { return err }
@@ -164,9 +120,7 @@ func collect(targetAbs string, c cfg) ([]item, error) {
 		pp := filepath.ToSlash(path)
 		if c.Include != "" && !strings.Contains(pp, c.Include) { return nil }
 		for _, bad := range excl {
-			if bad != "" && strings.Contains(pp, bad) {
-				return nil
-			}
+			if bad != "" && strings.Contains(pp, bad) { return nil }
 		}
 
 		st, err := os.Stat(path)
@@ -175,7 +129,7 @@ func collect(targetAbs string, c cfg) ([]item, error) {
 		if err != nil { return err }
 		sum := sha256.Sum256(data)
 		rel, _ := filepath.Rel(wd, path)
-		out = append(out, item{
+		out = append(out, Item{
 			rel:  filepath.ToSlash(rel),
 			abs:  path,
 			sha:  hex.EncodeToString(sum[:]),
@@ -189,7 +143,8 @@ func collect(targetAbs string, c cfg) ([]item, error) {
 	return out, nil
 }
 
-func splitClean(s string) []string {
+// SplitClean splits a comma-separated list and trims/normalizes separators.
+func SplitClean(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -199,7 +154,8 @@ func splitClean(s string) []string {
 	return out
 }
 
-func stripPackageLine(src []byte) []byte {
+// StripPackageLine removes the first "package" line from a Go source file.
+func StripPackageLine(src []byte) []byte {
 	lines := bytes.Split(src, []byte("\n"))
 	out := make([][]byte, 0, len(lines))
 	skipped := false
@@ -214,14 +170,8 @@ func stripPackageLine(src []byte) []byte {
 	return bytes.Join(out, []byte("\n"))
 }
 
-func fatal(err error) {
-	fmt.Fprintf(os.Stderr, "❌ error: %v\n", err)
-	os.Exit(1)
-}
-
-// ---------- RC helpers ----------
-
-func writeDefaultRC(path string) error {
+// WriteDefaultRC writes a new RC file with defaults to the given path.
+func WriteDefaultRC(path string) error {
 	content := `# .codedumprc
 # Root of the project (where the final TXT will be saved)
 root=.
@@ -247,7 +197,8 @@ pkg=false
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-func readRC(path string, c *cfg) error {
+// ReadRC populates the given Config from a RC file.
+func ReadRC(path string, c *Config) error {
 	b, err := os.ReadFile(path)
 	if err != nil { return err }
 	lines := strings.Split(string(b), "\n")
@@ -271,31 +222,29 @@ func readRC(path string, c *cfg) error {
 	return nil
 }
 
-func findRC() string {
-	// Look for .codedumprc from cwd upwards
+// FindRC searches for a .codedumprc starting from the CWD up to root, then $HOME.
+func FindRC() string {
 	wd, _ := os.Getwd()
 	cur := wd
 	for {
-		rc := filepath.Join(cur, defaultRCName)
-		if _, err := os.Stat(rc); err == nil {
-			return rc
-		}
+		rc := filepath.Join(cur, DefaultRCName)
+		if _, err := os.Stat(rc); err == nil { return rc }
 		parent := filepath.Dir(cur)
 		if parent == cur { break }
 		cur = parent
 	}
-	// Fallback to $HOME/.codedumprc
 	if home, err := os.UserHomeDir(); err == nil {
-		rc := filepath.Join(home, defaultRCName)
-		if _, err := os.Stat(rc); err == nil {
-			return rc
-		}
+		rc := filepath.Join(home, DefaultRCName)
+		if _, err := os.Stat(rc); err == nil { return rc }
 	}
 	return ""
 }
 
-func absFrom(base, p string) string {
+// AbsFrom resolves a possibly-relative path against a base directory.
+func AbsFrom(base, p string) string {
 	if filepath.IsAbs(p) { return p }
 	ap, _ := filepath.Abs(filepath.Join(base, p))
 	return ap
 }
+
+

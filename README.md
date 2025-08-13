@@ -34,10 +34,14 @@ Tip: drop your GIF at `docs/usage.gif` or update the path above.
 ```bash
 git clone https://github.com/devMoisa/tool.codeDump
 cd tool.codeDump
-go build -o codedump .
+go build -o codedump ./cmd/codedump
 ```
 
-You now have a local `./codedump` binary.
+You now have a local `./codedump` binary. You can also install it globally with:
+
+```bash
+go install ./cmd/codedump
+```
 
 ---
 
@@ -122,6 +126,30 @@ CLI flags mirror these keys and override them when provided.
 
 ---
 
+## Library usage
+
+You can embed tool.codeDump in your own Go programs:
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/devMoisa/tool.codeDump/pkg/codedump"
+)
+
+func main() {
+    cfg := codedump.DefaultConfig()
+    cfg.Target = "./models"
+    cfg.Out = "models_tree.txt"
+    out, n, err := codedump.Dump(cfg)
+    if err != nil { panic(err) }
+    fmt.Printf("wrote %s with %d files\n", out, n)
+}
+```
+
+---
+
 ## Output Format (sample)
 
 Each file is preceded by a header describing the environment, target, and file details:
@@ -168,4 +196,5 @@ Each file is preceded by a header describing the environment, target, and file d
 ## License
 
 MIT — do whatever helps your workflow. Contributions welcome.
+
 # tool.codeDump
